@@ -1,5 +1,6 @@
 """Parser registry. Each module exposes DOC_TYPE, BROKER, detect(doc) and
-parse(doc). Detection is a regex/text fingerprint on the document itself,
+parse(doc); parse returns a StatementDocument, or a list of them for a
+file that holds several accounts. Detection is a regex/text fingerprint on the document itself,
 never the filename — broker downloads are named inconsistently
 ("AffichageDocument (7).pdf")."""
 
@@ -7,7 +8,9 @@ from . import (
     boursobank_avis_opere,
     boursobank_releve_compte,
     boursobank_releve_especes,
+    bourso_vie_arbitrage,
     cm_av_arbitrage,
+    cm_xlsx_comptes,
     trade_republic_csv,
 )
 
@@ -17,6 +20,8 @@ PARSERS = [
     boursobank_releve_especes,
     boursobank_releve_compte,
     cm_av_arbitrage,
+    bourso_vie_arbitrage,
+    cm_xlsx_comptes,
 ]
 
 

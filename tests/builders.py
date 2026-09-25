@@ -47,3 +47,11 @@ def positioned_pdf(pages, preamble="", path="synthetic.pdf"):
 
 def text_doc(text, path="synthetic.pdf"):
     return RawDocument(path, text, pages=[])
+
+
+def workbook_doc(sheets, path="synthetic.xlsx"):
+    """sheets: {name: list of rows}, cell values as load_document gives
+    them (str, Decimal, date or None)."""
+    from statement_parser.text import sheets_text
+
+    return RawDocument(path, sheets_text(sheets), sheets=sheets)

@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "statement-parser"
-version = "0.1.0"
+version = "0.2.0"
 description = "Regex-only parser for broker/bank statements (no LLM, no API keys)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "pdfplumber>=0.11",
+    "openpyxl>=3.1",
 ]
 
 [project.optional-dependencies]

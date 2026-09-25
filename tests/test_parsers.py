@@ -4,15 +4,18 @@ from pathlib import Path
 
 import pytest
 
-from statement_parser import StatementParseError, parse_document, parse_statement
+from statement_parser import StatementParseError, parse_document, parse_file, parse_statement
 from statement_parser.parsers import (
     boursobank_avis_opere,
     boursobank_releve_compte,
     boursobank_releve_especes,
+    bourso_vie_arbitrage,
     cm_av_arbitrage,
+    cm_xlsx_comptes,
     find_parser,
 )
-from tests.builders import header_line, line, positioned_pdf, text_doc
+from statement_parser.text import load_document
+from tests.builders import header_line, line, positioned_pdf, text_doc, workbook_doc
 
 FIXTURES = Path(__file__).parent / "fixtures"
 D = Decimal
@@ -225,6 +228,166 @@ def test_cm_av_arbitrage_total_mismatch_is_a_warning():
     assert any("before" in w for w in doc.warnings)
 
 
+# --- Bourso Vie arbitrage --------------------------------------------------------------
+
+BOURSO_VIE = """Madame JEANNE DUPONT
+- Références à rappeler -
+Bourso Vie
+Contrat n° 10000001
+OBJET : Arbitrage
+Par la présente lettre avenant, nous vous détaillons ci-dessous le changement de répartition de votre épargne,
+Arbitrage d'un montant de : 1 200,50 Euros en date du 05/05/2026
+- Désinvestissement :
+- Fonds en Euros
+- Fonds Euro Exemple
+Valeur au 06/05/2026 : 1 200,50 Euros
+- Réinvestissement :
+du fait de la gratuité de votre arbitrage
+- Unités de Compte
+- *Compartiment SICAV FUND ALPHA -A-ACC (ISIN : LU0000000001)
+Valeur au 06/05/2026 : 4,0000 Parts à 200,00 Euros l'unité soit 800,00 Euros
+- *Compartiment SICAV FUND BETA RC Eur (ISIN : LU0000000002)
+Valeur au 06/05/2026 : 2,0010 Parts à 200,00 Euros l'unité soit 400,50 Euros
+1/2
+Madame JEANNE DUPONT
+- Références à rappeler -
+Bourso Vie
+Contrat n° 10000001
+OBJET : Valeur atteinte après arbitrage
+- Unités de Compte
+- *Compartiment SICAV FUND ALPHA -A-ACC (ISIN : LU0000000001)
+Nombre de parts : 4,0000 Parts
+Valeur de la part au 06/05/2026 : 200,00 Euros
+Contre-valeur en Euros : 799,99 Euros
+- *Compartiment SICAV FUND BETA RC Eur (ISIN : LU0000000002)
+Nombre de parts : 2,0010 Parts
+Valeur de la part au 06/05/2026 : 200,00 Euros
+Contre-valeur en Euros : 400,50 Euros
+Epargne atteinte totale : 1 200,50 Euros
+"""
+
+
+def test_bourso_vie_arbitrage_switches_and_positions():
+    doc = parse_document(text_doc(BOURSO_VIE))
+
+    assert doc.doc_type == bourso_vie_arbitrage.DOC_TYPE
+    assert (doc.account_ref, doc.account_label) == ("10000001", "Bourso Vie")
+    assert doc.period_start == doc.period_end == date(2026, 5, 5)
+    assert doc.warnings == []  # 799,99 vs 800,00 is within tolerance
+
+    euro, alpha, beta = doc.movements
+    assert (euro.kind, euro.security_name, euro.quantity, euro.gross) == ("SWITCH", "Fonds Euro Exemple", None, D("1200.50"))
+    assert euro.extra == {"value_delta": D("-1200.50"), "unitless": True}
+    assert (alpha.kind, alpha.isin, alpha.quantity, alpha.price, alpha.gross) == (
+        "SWITCH_IN", "LU0000000001", D("4.0000"), D("200.00"), D("800.00"))
+    assert alpha.security_name == "Compartiment SICAV FUND ALPHA -A-ACC"
+    assert alpha.value_date == date(2026, 5, 6)
+    assert (beta.kind, beta.quantity) == ("SWITCH_IN", D("2.0010"))
+    assert all(m.amount == 0 for m in doc.movements)
+
+    first, second = doc.positions
+    assert (first.snapshot, first.section, first.isin) == ("after", "Unités de Compte", "LU0000000001")
+    assert (first.quantity, first.price, first.value, first.as_of) == (D("4.0000"), D("200.00"), D("799.99"), date(2026, 5, 6))
+    assert second.value == D("400.50")
+
+
+def test_bourso_vie_arbitrage_unit_fund_sold_and_mismatch_warning():
+    text = BOURSO_VIE.replace("- Fonds en Euros\n- Fonds Euro Exemple\nValeur au 06/05/2026 : 1 200,50 Euros", (
+        "- Unités de Compte\n- *Compartiment SICAV FUND GAMMA (ISIN : FR0000000003)\n"
+        "Valeur au 06/05/2026 : 10,0000 Parts à 120,00 Euros l'unité soit 1 200,00 Euros"))
+    doc = parse_document(text_doc(text))
+
+    gamma = doc.movements[0]
+    assert (gamma.kind, gamma.isin, gamma.quantity) == ("SWITCH_OUT", "FR0000000003", D("-10.0000"))
+    assert any("désinvestissement" in w for w in doc.warnings)
+
+
+# --- Crédit Mutuel comptes.xlsx --------------------------------------------------------
+
+def cm_sheet(label, rib, rows, closing="Solde au 25/09/2026 : ", balance=None):
+    title = f"Situation de votre compte {label} (EUR) au 25/09/2026"
+    return [
+        [title] * 6,
+        [f"R.I.B. : {rib}"] * 6,
+        [None, None, None, "Solde initial : ", "Solde initial : ", None, "EUR"],
+        ["Liste de vos comptes"] * 6,
+        ["Date", "Valeur", "Libellé", "Débit", "Crédit", "Solde", "Dev"],
+        *[[d, v, lib, deb, cred, None, "EUR"] for d, v, lib, deb, cred in rows],
+        [None] * 7,
+        [None, None, None, closing, closing, balance, "EUR"],
+        ["Liste de vos comptes"] * 6,
+    ]
+
+
+def cm_workbook(summary_livret=D("1100")):
+    return {
+        "Vos comptes": [
+            ["Votre situation financière au 25/09/2026", None, None, None],
+            [None, None, None, None],
+            ["Compte", "R.I.B.", "Solde", "Dev"],
+            ["LIVRET BLEU MME DUPONT", "10000 00001 00000000001", summary_livret, "EUR"],
+            ["PRET IMMO", "10000 00001 00000000002", D("-50000.5"), "EUR"],
+            ["COMPTE COURANT MME DUPONT", "10000 00001 00000000003", D("42.1"), "EUR"],
+        ],
+        "Cpt 00001 00000000003": cm_sheet("COMPTE COURANT MME DUPONT", "10000 00001 00000000003", [
+            (date(2026, 9, 1), date(2026, 9, 1), "PAIEMENT CB 0109 PARIS BOULANGERIE CARTE 0000", D("-7.9"), None),
+            (date(2026, 9, 2), date(2026, 9, 3), "VIR DE MME DUPONT", None, D("50")),
+        ], balance=D("42.1")),
+        "Cpt 00001 00000000001": cm_sheet("LIVRET BLEU MME DUPONT", "10000 00001 00000000001", [
+            (date(2026, 8, 30), date(2026, 9, 1), "VIR DE MME DUPONT", None, D("100")),
+        ], balance=D("1100")),
+    }
+
+
+def test_cm_xlsx_one_document_per_account():
+    livret, loan, current = parse_document(workbook_doc(cm_workbook()))
+
+    assert {d.doc_type for d in (livret, loan, current)} == {cm_xlsx_comptes.DOC_TYPE}
+    assert (livret.account_ref, livret.account_label) == ("10000 00001 00000000001", "LIVRET BLEU MME DUPONT")
+
+    assert (current.period_start, current.period_end) == (date(2026, 9, 1), date(2026, 9, 25))
+    card, transfer = current.movements
+    assert (card.date, card.amount, card.kind, card.line_no) == (date(2026, 9, 1), D("-7.90"), "PAIEMENT", 6)
+    assert (transfer.value_date, transfer.amount, transfer.extra) == (date(2026, 9, 3), D("50.00"), {"sheet": "Cpt 00001 00000000003"})
+    assert [(b.kind, b.as_of, b.balance) for b in current.balances] == [("closing", date(2026, 9, 25), D("42.10"))]
+    assert current.check_balance() is None  # no opening balance in the export
+    assert current.warnings == []
+
+    # listed in the summary only: balance, no movements
+    assert (loan.account_ref, loan.account_label, loan.movements) == ("10000 00001 00000000002", "PRET IMMO", [])
+    assert [(b.as_of, b.balance) for b in loan.balances] == [(date(2026, 9, 25), D("-50000.50"))]
+
+
+def test_cm_xlsx_summary_mismatch_is_a_warning():
+    livret = parse_document(workbook_doc(cm_workbook(summary_livret=D("999"))))[0]
+    assert any("Vos comptes" in w for w in livret.warnings)
+
+
+def test_xlsx_loader_skips_hidden_sheets_and_parse_file(tmp_path):
+    openpyxl = pytest.importorskip("openpyxl")
+    workbook = openpyxl.Workbook()
+    workbook.remove(workbook.active)
+    for name, rows in cm_workbook().items():
+        ws = workbook.create_sheet(name)
+        for row in rows:
+            ws.append([float(v) if isinstance(v, Decimal) else v for v in row])
+    hidden = workbook.create_sheet("hidden_data")
+    hidden.append(["Situation de votre compte STALE (EUR) au 01/01/2021"])
+    hidden.sheet_state = "veryHidden"
+    path = tmp_path / "comptes.xlsx"
+    workbook.save(path)
+
+    raw = load_document(path)
+    assert "hidden_data" not in raw.sheets
+    row = raw.sheets["Cpt 00001 00000000003"][5]
+    assert (row[0], row[3]) == (date(2026, 9, 1), D("-7.9"))  # a date, and a Decimal without float noise
+
+    documents = parse_file(path)
+    assert [d.account_label for d in documents] == ["LIVRET BLEU MME DUPONT", "PRET IMMO", "COMPTE COURANT MME DUPONT"]
+    with pytest.raises(ValueError, match="use parse_file"):
+        parse_statement(path)
+
+
 # --- registry ----------------------------------------------------------------------------
 
 def test_unrecognized_document_raises():
@@ -234,5 +397,6 @@ def test_unrecognized_document_raises():
 
 def test_each_fixture_matches_exactly_one_parser():
     for doc in (text_doc(AVIS), text_doc(ARBITRAGE), especes([]),
-                positioned_pdf([], preamble=COMPTE_PREAMBLE)):
+                positioned_pdf([], preamble=COMPTE_PREAMBLE), text_doc(BOURSO_VIE),
+                workbook_doc(cm_workbook())):
         assert find_parser(doc) is not None
