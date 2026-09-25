@@ -29,6 +29,10 @@ for m in doc.movements:
 docs, errors = parse_statements("statements/")   # recursive; one bad file never hides the others
 ```
 
+Every attribute of `StatementDocument`, `Movement`, `CashBalance` and
+`Position`, and which ones each document type fills: see
+[docs/api.md](docs/api.md).
+
 ```bash
 statement-parser statements/              # one summary line per document
 statement-parser statements/ --json       # full JSON to stdout
