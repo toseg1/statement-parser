@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "statement-parser"
+version = "0.1.0"
+description = "Regex-only parser for broker/bank statements (no LLM, no API keys)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pdfplumber>=0.11",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.scripts]
+statement-parser = "statement_parser.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
