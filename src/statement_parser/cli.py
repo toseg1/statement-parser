@@ -1,8 +1,10 @@
-"""statement-parser CLI: one summary line per document; JSON on request.
-Nothing is written to disk unless --json-dir is given."""
+"""statement-parser CLI: one summary line per document (one per account
+for a multi-account .xlsx export); JSON on request. Nothing is written to
+disk unless --json-dir is given."""
 
 import argparse
 import sys
+from collections import Counter
 from pathlib import Path
 
 from . import parse_statements
@@ -21,13 +23,16 @@ def _summary(doc):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="statement-parser", description=__doc__)
-    ap.add_argument("paths", nargs="+", help="statement files or directories")
+    ap.add_argument("paths", nargs="+", help="statement files (.pdf, .csv, .xlsx) or directories")
     ap.add_argument("--json", action="store_true", help="print documents as JSON to stdout")
-    ap.add_argument("--json-dir", type=Path, help="write one <file>.json per document here")
+    ap.add_argument("--json-dir", type=Path,
+                    help="write one <file>.json per document here "
+                         "(<file>.<account_ref>.json for multi-account files)")
     ap.add_argument("--lenient", action="store_true", help="don't fail on a balance mismatch")
     args = ap.parse_args(argv)
 
     documents, errors = parse_statements(args.paths, strict=not args.lenient)
+    per_file = Counter(doc.source_file for doc in documents)
     for doc in documents:
         if args.json:
             print(doc.to_json())
@@ -37,7 +42,10 @@ def main(argv=None):
                 print(f"  warning: {warning}")
         if args.json_dir:
             args.json_dir.mkdir(parents=True, exist_ok=True)
-            (args.json_dir / f"{Path(doc.source_file).name}.json").write_text(doc.to_json(), encoding="utf-8")
+            name = Path(doc.source_file).name
+            if per_file[doc.source_file] > 1:
+                name = f"{name}.{(doc.account_ref or '').replace(' ', '')}"
+            (args.json_dir / f"{name}.json").write_text(doc.to_json(), encoding="utf-8")
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
     return 1 if errors else 0

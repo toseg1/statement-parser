@@ -9,7 +9,7 @@ extraction loses.
 import csv
 import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
@@ -78,12 +78,14 @@ class Line:
 @dataclass
 class RawDocument:
     """What a parser receives: the path, the full text, and — for PDFs —
-    pages of positioned lines; for CSVs, the rows."""
+    pages of positioned lines; for CSVs, the rows; for XLSX workbooks,
+    the visible sheets."""
 
     path: str
     text: str
     pages: list = field(default_factory=list)  # list[list[Line]]
     rows: Optional[list] = None  # CSV rows as dicts
+    sheets: Optional[dict] = None  # XLSX: sheet name -> list of rows (lists of cell values)
 
     @property
     def name(self):
@@ -110,8 +112,58 @@ def group_lines(words, y_tolerance=3.0):
     return lines
 
 
+def cell_value(value):
+    """An openpyxl cell value as the parsers want it: floats and ints ->
+    Decimal (through str, so -33.91 stays -33.91), datetime -> date,
+    blank strings -> None, anything else unchanged."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return Decimal(str(value))
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
+
+
+def load_workbook(path):
+    """Visible sheets only: exports keep stale template sheets around as
+    'veryHidden', and those must never be read as accounts."""
+    import openpyxl  # imported lazily: callers without XLSX files don't need it
+
+    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    try:
+        sheets = {
+            ws.title: [[cell_value(v) for v in row] for row in ws.iter_rows(values_only=True)]
+            for ws in workbook.worksheets
+            if ws.sheet_state == "visible"
+        }
+    finally:
+        workbook.close()
+    return sheets
+
+
+def sheets_text(sheets):
+    """Sheet names and every text cell, one per line, for detect()."""
+    lines = []
+    for name, rows in sheets.items():
+        lines.append(name)
+        for row in rows:
+            seen = None
+            for value in row:
+                # exports repeat a merged title in every cell of the row
+                if isinstance(value, str) and value != seen:
+                    lines.append(value)
+                    seen = value
+    return "\n".join(lines)
+
+
 def load_document(path):
     path = Path(path)
+    if path.suffix.lower() == ".xlsx":
+        sheets = load_workbook(path)
+        return RawDocument(str(path), sheets_text(sheets), sheets=sheets)
     if path.suffix.lower() == ".csv":
         with path.open(newline="", encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))

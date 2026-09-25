@@ -11,4 +11,6 @@ venv/
 
 # Real statements never belong in this repo — tests use synthetic fixtures only
 *.pdf
+*.xlsx
 !tests/fixtures/*.pdf
+!tests/fixtures/*.xlsx

@@ -1,12 +1,13 @@
 # API reference
 
-Everything `parse_statement` / `parse_statements` return, and which fields
-each document type fills.
+Everything `parse_statement` / `parse_file` / `parse_statements` return,
+and which fields each document type fills.
 
 ```python
-from statement_parser import parse_statement, parse_statements
+from statement_parser import parse_file, parse_statement, parse_statements
 
 doc = parse_statement(path, strict=True)            # -> StatementDocument
+docs = parse_file(path, strict=True)                # -> list[StatementDocument]
 docs, errors = parse_statements(paths, strict=True) # -> (list[StatementDocument], list[str])
 ```
 
@@ -14,7 +15,8 @@ docs, errors = parse_statements(paths, strict=True) # -> (list[StatementDocument
 
 ### `parse_statement(path, strict=True)`
 
-Parses one `.pdf` or `.csv` file and returns a `StatementDocument`.
+Parses one `.pdf`, `.csv` or `.xlsx` file and returns its
+`StatementDocument`.
 
 Raises `StatementParseError` when:
 
@@ -25,17 +27,28 @@ Raises `StatementParseError` when:
 With `strict=False`, a mismatched document is returned anyway, with a
 line in `doc.warnings` explaining what failed.
 
-Raises `ValueError` when more than one parser matches the document.
+Raises `ValueError` when more than one parser matches the document, or
+when the file holds several accounts (a `cm_xlsx_comptes` workbook). Use
+`parse_file` for those.
+
+### `parse_file(path, strict=True)`
+
+Same as `parse_statement`, but always returns a
+`list[StatementDocument]`. The list has one entry for a single statement,
+and one per account for a multi-account file. With `strict=True`, every
+document in the file must pass the balance check.
 
 ### `parse_statements(paths, strict=True)`
 
 `paths` can be a directory, a file, or an iterable of directories and
-files. Directories are searched recursively for `.pdf` and `.csv` files
-(case-insensitive), in sorted order.
+files. Directories are searched recursively for `.pdf`, `.csv` and
+`.xlsx` files (case-insensitive), in sorted order. Excel lock files
+(`~$…`) are skipped.
 
 Returns a `(documents, errors)` tuple:
 
-- `documents`: `list[StatementDocument]` for every file that parsed;
+- `documents`: `list[StatementDocument]` for every file that parsed, with
+  one entry per account for a multi-account file;
 - `errors`: `list[str]`, one message per file that raised
   `StatementParseError` or `ValueError`. Each message starts with the file
   name.
@@ -47,14 +60,16 @@ Other exceptions still propagate, such as a missing file or a PDF that
 
 Same as `parse_statement`, but takes a `RawDocument` that is already
 loaded (see `statement_parser.text.load_document`). Use it to parse
-in-memory content or to test with synthetic documents.
+in-memory content or to test with synthetic documents. It returns
+whatever the parser returns: a `StatementDocument`, or a list of them for
+a multi-account document.
 
 ## `StatementDocument`
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `source_file` | `str` | Path of the parsed file |
-| `broker` | `str` | `"Trade Republic"`, `"BoursoBank"`, `"Crédit Mutuel"` |
+| `source_file` | `str` | Path of the parsed file (shared by every account of a multi-account file) |
+| `broker` | `str` | `"Trade Republic"`, `"BoursoBank"`, `"Bourso Vie"`, `"Crédit Mutuel"` |
 | `doc_type` | `str` | Parser that handled it (see [per-type fields](#fields-by-document-type)) |
 | `account_ref` | `str \| None` | Account number, IBAN or contract number, as printed |
 | `account_label` | `str \| None` | Account or contract name (`"PEA"`, `"Livret A"`, …) |
@@ -219,11 +234,62 @@ here keeps its default (`None`, `0`, `[]` or `{}`).
 - **Warnings:** a warning is added when a snapshot has no `TOTAL` line
   or its rows don't sum to it (±0.05).
 
+### `bourso_vie_arbitrage`: Bourso Vie (Generali) arbitrage letter
+
+- **Document:** `account_ref` is the contract number (`"Contrat n° …"`),
+  `account_label = "Bourso Vie"`. `period_start == period_end ==` the
+  operation date ("en date du …"). No balances.
+- **Movements:** one per support listed under *Désinvestissement* or
+  *Réinvestissement*, always with `amount == 0`. `date` is the operation
+  date and `value_date` the valuation date ("Valeur au …").
+  - Unit-linked funds: `kind` is `"SWITCH_OUT"` (sold) or `"SWITCH_IN"`
+    (bought). `quantity` is signed, and `price`, `gross` (the value
+    printed after "soit") and `isin` are set. `security_name` is printed
+    as-is, without the leading `*` (e.g.
+    `"Compartiment SICAV … -A-ACC"`).
+  - Euro fund: `kind="SWITCH"`, `gross` = value, `quantity=None`, and
+    `extra = {"value_delta": Decimal, "unitless": True}` (negative when
+    sold). This is the same shape as `cm_av_arbitrage`.
+- **Positions:** the *Valeur atteinte après arbitrage* page, with
+  `snapshot="after"`. Each row has `isin`, `quantity`, `price`, `value`
+  (the contre-valeur) and `section` (`"Unités de Compte"` /
+  `"Fonds en Euros"`), dated with the NAV date.
+- **Warnings:** added when the sold or bought supports don't sum to the
+  "Arbitrage d'un montant de" figure, or when the positions don't sum to
+  "Epargne atteinte totale". The tolerance is ±0.05.
+
+### `cm_xlsx_comptes`: Crédit Mutuel `comptes.xlsx` export
+
+One workbook, several accounts: `parse` returns **a list**, with one
+document per account listed on the *Vos comptes* summary sheet, in that
+order. Hidden sheets are ignored.
+
+- **Document:** `account_ref` is the RIB as printed
+  (`"00000 00000 00000000000"`), and `account_label` is the account name as
+  printed (it includes the holder's name). `period_start` is the first
+  movement date and `period_end` is the "Solde au" date.
+- **Balances:** `closing` only. The export's opening balance and running
+  *Solde* column are uncomputed formulas, so no opening balance is known,
+  and `check_balance()` returns `None`. The closing balance is
+  cross-checked against the *Vos comptes* summary instead.
+- **Movements:** one per sheet row.
+  - `date`, `value_date` (the *Valeur* column), `label` (*Libellé*) and
+    `amount` (*Débit* is negative, *Crédit* positive, in cents).
+  - `kind` is the first word of the label (`VIR`, `PAIEMENT`, `PRLV`, …).
+  - `line_no` is the sheet row number, and `extra = {"sheet": <sheet name>}`.
+- **Accounts without a sheet** (typically a loan, which the export lists
+  on the summary only): a document with no movements and one `closing`
+  balance, dated at the summary date. A loan's balance is negative.
+- **Warnings:** added when the summary balance differs from the sheet's
+  closing balance, when a row has both or neither of *Débit* / *Crédit*,
+  when an amount has the wrong sign, when the "Solde au" row is missing,
+  or when an account sheet isn't listed on the summary.
+
 ## Examples
 
 ```python
 from collections import defaultdict
-from statement_parser import parse_statements
+from statement_parser import parse_file, parse_statements
 
 docs, errors = parse_statements("statements/")
 for e in errors:
@@ -250,6 +316,12 @@ orders = [
 # Current allocation after the latest arbitrage
 arb = max((d for d in docs if d.doc_type == "cm_av_arbitrage"), key=lambda d: d.period_end)
 after = [p for p in arb.positions if p.snapshot == "after"]
+
+# Latest balance of every Crédit Mutuel account (one workbook, several accounts)
+balances = {
+    d.account_ref: d.balance("closing").balance
+    for d in parse_file("comptes.xlsx")
+}
 
 # Export
 open("out.json", "w").write(docs[0].to_json())
