@@ -14,3 +14,6 @@ venv/
 *.xlsx
 !tests/fixtures/*.pdf
 !tests/fixtures/*.xlsx
+
+# Personnal tests
+*tests-zone/
