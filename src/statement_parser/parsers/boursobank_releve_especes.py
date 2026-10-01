@@ -6,7 +6,7 @@ transfers in and out, and one line per order (with units and a
 import re
 
 from ..models import CashBalance, Movement, StatementDocument
-from ..text import DATE, FR_NUMBER, fr_date, fr_decimal
+from ..text import DATE, FR_NUMBER, currency_code, fr_date, fr_decimal
 from . import _columns
 
 DOC_TYPE = "boursobank_releve_especes"
@@ -14,6 +14,8 @@ BROKER = "BoursoBank"
 
 ACCOUNT_RE = re.compile(r"Références de votre compte espèces\s+(\d{5} \d{5} \d{11}) Compte (\S+)")
 EXTRACT_DATE_RE = re.compile(rf"Extrait au {DATE}")
+# the table header: "... Nom de la valeur Débit EUR Crédit EUR"
+CURRENCY_RE = re.compile(r"Débit ([A-Z]{3}) Crédit ([A-Z]{3})")
 ORDER_RE = re.compile(
     rf"^(SOUSCRIPTION D'OPC|RACHAT D'OPC|ACHAT COMPTANT|VENTE COMPTANT|ACHAT|VENTE)"
     rf"\s+({FR_NUMBER}|\d+)\s+(.+)$"
@@ -30,6 +32,11 @@ def parse(doc):
     account = ACCOUNT_RE.search(doc.text)
     if account:
         result.account_ref, result.account_label = account.group(1), account.group(2)
+    currency = CURRENCY_RE.search(doc.text)
+    if currency:
+        result.currency = currency_code(currency.group(1))
+    else:
+        result.warnings.append("no 'Débit XXX Crédit XXX' header: currency assumed EUR")
     extract = EXTRACT_DATE_RE.search(doc.text)
     if extract:
         result.period_end = fr_date(extract.group(1))
@@ -40,16 +47,16 @@ def parse(doc):
         when = fr_date(row.words[0].text)
         label = " ".join(w.text for w in row.words[1:])
         if label.startswith("ANCIEN SOLDE"):
-            result.balances.append(CashBalance(when, row.amount, "opening"))
+            result.balances.append(CashBalance(when, row.amount, "opening", currency=result.currency))
             result.period_start = when
             continue
         if label.startswith("NOUVEAU SOLDE"):
-            result.balances.append(CashBalance(when, row.amount, "closing"))
+            result.balances.append(CashBalance(when, row.amount, "closing", currency=result.currency))
             result.period_end = result.period_end or when
             continue
 
         movement = Movement(
-            date=when, label=label, amount=row.amount, kind=label.split()[0],
+            date=when, label=label, amount=row.amount, currency=result.currency, kind=label.split()[0],
             details=row.details, page=row.page, line_no=row.line_no,
         )
         order = ORDER_RE.match(label)

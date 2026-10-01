@@ -45,6 +45,15 @@ def fr_decimal(token):
     return Decimal(token.replace(" ", "").replace(".", "").replace(",", "."))
 
 
+def currency_code(token):
+    """The ISO code for a currency as printed: "EUR", "€", "Euros",
+    "euros" -> "EUR"; another 3-letter code ("USD") as is; else None."""
+    token = (token or "").strip()
+    if token == "€" or token.lower() in {"euro", "euros"}:
+        return "EUR"
+    return token if re.fullmatch(r"[A-Z]{3}", token) else None
+
+
 def fr_date(token):
     day, month, year = (int(p) for p in token.split("/"))
     return date(year, month, day)
