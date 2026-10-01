@@ -4,7 +4,12 @@ Sign convention: `Movement.amount` is the signed *net* cash effect on the
 account the document is about (credit > 0, debit < 0). `gross`, `fee`
 and `tax` are the positive magnitudes the document shows, when it shows
 them separately. A movement with no cash effect (a security received for
-free, a switch inside an insurance contract) has amount == 0.
+free, a switch inside an insurance contract) has amount == 0, except
+Trade Republic crypto deliveries, whose amount is in coin units with the
+coin symbol as currency.
+
+`currency` on every record is the one the document prints; the "EUR"
+defaults below only stand when a document states none.
 """
 
 import dataclasses

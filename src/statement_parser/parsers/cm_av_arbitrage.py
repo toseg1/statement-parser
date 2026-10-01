@@ -10,7 +10,7 @@ switch moves money between funds inside the contract, not in or out).
 import re
 
 from ..models import ZERO, Movement, Position, StatementDocument
-from ..text import fr_decimal, fr_long_date
+from ..text import currency_code, fr_decimal, fr_long_date
 
 DOC_TYPE = "cm_av_arbitrage"
 BROKER = "Crédit Mutuel"
@@ -25,7 +25,9 @@ FUND_ROW_RE = re.compile(rf"^(.+?) ({UNITS}) ({UNITS}) ({VALUE})$")
 VALUE_ONLY_RE = re.compile(rf"^(.+?) ({VALUE})$")
 TOTAL_RE = re.compile(rf"^TOTAL ({VALUE})$")
 # Column header lines between a snapshot title and its first row
-HEADER_RE = re.compile(r"^(Valeur de la part|Catégories / Supports|en euros)")
+HEADER_RE = re.compile(r"^(Valeur de la part|Catégories / Supports|en (?:euros|[A-Z]{3})\b)")
+# "en euros en euros": the unit of the NAV and value columns
+CURRENCY_RE = re.compile(r"^en (euros|[A-Z]{3})\b")
 TOLERANCE = fr_decimal("0,05")
 
 
@@ -47,7 +49,7 @@ def parse(doc):
         return result
     result.period_start = result.period_end = as_of
 
-    snapshot, section = None, None
+    snapshot, section, currency = None, None, None
     totals = {}
     for raw in doc.text.splitlines():
         line = raw.strip()
@@ -57,6 +59,8 @@ def parse(doc):
             section = None
             continue
         if snapshot is None or not line or HEADER_RE.match(line):
+            if m := CURRENCY_RE.match(line):
+                currency = result.currency = currency_code(m.group(1))
             continue
         total = TOTAL_RE.match(line)
         if total:
@@ -69,7 +73,7 @@ def parse(doc):
                 Position(
                     as_of=as_of, security_name=row.group(1).strip(), value=fr_decimal(row.group(4)),
                     quantity=fr_decimal(row.group(2)), price=fr_decimal(row.group(3)),
-                    section=section, snapshot=snapshot,
+                    currency=result.currency, section=section, snapshot=snapshot,
                 )
             )
             continue
@@ -78,13 +82,16 @@ def parse(doc):
             result.positions.append(
                 Position(
                     as_of=as_of, security_name=value_only.group(1).strip(),
-                    value=fr_decimal(value_only.group(2)), section=section, snapshot=snapshot,
+                    value=fr_decimal(value_only.group(2)), currency=result.currency,
+                    section=section, snapshot=snapshot,
                 )
             )
             continue
         if line.isupper() and not re.search(r"\d", line):
             section = line
 
+    if currency is None:
+        result.warnings.append("no 'en euros' column header: currency assumed EUR")
     for key in ("before", "after"):
         listed = sum((p.value for p in result.positions if p.snapshot == key), ZERO)
         if key not in totals:
@@ -92,11 +99,11 @@ def parse(doc):
         elif abs(listed - totals[key]) > TOLERANCE:
             result.warnings.append(f"{key}: rows sum to {listed}, TOTAL says {totals[key]}")
 
-    result.movements = _switches(result.positions, as_of)
+    result.movements = _switches(result.positions, as_of, result.currency)
     return result
 
 
-def _switches(positions, as_of):
+def _switches(positions, as_of, currency):
     before = {p.security_name: p for p in positions if p.snapshot == "before"}
     after = {p.security_name: p for p in positions if p.snapshot == "after"}
     movements = []
@@ -106,7 +113,8 @@ def _switches(positions, as_of):
             delta_value = (a.value if a else ZERO) - (b.value if b else ZERO)
             if delta_value:
                 movements.append(
-                    Movement(date=as_of, label=f"Arbitrage {name}", amount=ZERO, kind="SWITCH",
+                    Movement(date=as_of, label=f"Arbitrage {name}", amount=ZERO, currency=currency,
+                             kind="SWITCH",
                              security_name=name, gross=abs(delta_value),
                              extra={"value_delta": delta_value, "unitless": True})
                 )
@@ -117,7 +125,7 @@ def _switches(positions, as_of):
         price = (a or b).price
         movements.append(
             Movement(
-                date=as_of, label=f"Arbitrage {name}", amount=ZERO,
+                date=as_of, label=f"Arbitrage {name}", amount=ZERO, currency=currency,
                 kind="SWITCH_IN" if delta > 0 else "SWITCH_OUT",
                 quantity=delta, security_name=name, price=price,
                 gross=abs(delta * price).quantize(fr_decimal("0,01")),

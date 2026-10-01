@@ -6,7 +6,7 @@ first line has date, label, value date and amount; any following lines
 import re
 
 from ..models import CashBalance, Movement, StatementDocument
-from ..text import DATE, FR_AMOUNT, classify_amount, fr_date, fr_decimal
+from ..text import DATE, FR_AMOUNT, classify_amount, currency_code, fr_date, fr_decimal
 from . import _columns
 
 DOC_TYPE = "boursobank_releve_compte"
@@ -16,7 +16,8 @@ IBAN_RE = re.compile(r"I\.B\.A\.N\.\s*(FR[\d ]{20,40}\d)")
 PERIOD_RE = re.compile(rf"du {DATE} ?au {DATE}")
 LABEL_RE = re.compile(r"Compte d'épargne ?: ?(.+)")
 OPENING_RE = re.compile(rf"SOLDE ?AU ?: ?{DATE}")
-CLOSING_RE = re.compile(r"Nouveau ?solde ?en ?EUR")
+CLOSING_RE = re.compile(r"Nouveau ?solde ?en ?[A-Z]{3}")
+CURRENCY_RE = re.compile(r"MOUVEMENTS EN ([A-Z]{3})")
 # "Réf" comes out as "Rèf": the statement font's glyph mapping is lossy
 REFERENCE_RE = re.compile(r"R[éèe]f ?: ?(\S+)")
 # The footer that closes the movements table on every page
@@ -25,7 +26,7 @@ VALUE_DATE_END = re.compile(rf"\s{DATE}$")
 
 
 def detect(doc):
-    return "MOUVEMENTS EN EUR" in doc.text and "Extrait de votre compte" in doc.text
+    return CURRENCY_RE.search(doc.text) is not None and "Extrait de votre compte" in doc.text
 
 
 def _closing_amount(doc):
@@ -55,6 +56,7 @@ def parse(doc):
         result.account_ref = iban.group(1).replace(" ", "")
     label = LABEL_RE.search(doc.text)
     result.account_label = label.group(1).strip() if label else "Compte courant"
+    result.currency = currency_code(CURRENCY_RE.search(doc.text).group(1))  # detect() checked it
     period = PERIOD_RE.search(doc.text)
     if period:
         result.period_start, result.period_end = fr_date(period.group(1)), fr_date(period.group(2))
@@ -63,7 +65,8 @@ def parse(doc):
         text = row.text
         opening = OPENING_RE.search(text)
         if opening and row.amount is not None:
-            result.balances.append(CashBalance(fr_date(opening.group(1)), row.amount, "opening"))
+            result.balances.append(CashBalance(fr_date(opening.group(1)), row.amount, "opening",
+                                               currency=result.currency))
             continue
         if CLOSING_RE.search(text) or row.amount is None or not _columns.DATE_START.match(text):
             continue
@@ -78,7 +81,8 @@ def parse(doc):
         reference = next((m.group(1) for d in row.details if (m := REFERENCE_RE.search(d))), None)
         result.movements.append(
             Movement(
-                date=when, label=rest, amount=row.amount, kind=rest.split()[0] if rest else None,
+                date=when, label=rest, amount=row.amount, currency=result.currency,
+                kind=rest.split()[0] if rest else None,
                 value_date=value_date, details=row.details, reference=reference,
                 page=row.page, line_no=row.line_no,
             )
@@ -86,7 +90,7 @@ def parse(doc):
 
     closing = _closing_amount(doc)
     if closing is not None and result.period_end:
-        result.balances.append(CashBalance(result.period_end, closing, "closing"))
+        result.balances.append(CashBalance(result.period_end, closing, "closing", currency=result.currency))
     if result.check_balance() is False:
         result.warnings.append("opening balance + movements != closing balance")
     return result

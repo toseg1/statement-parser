@@ -11,7 +11,7 @@ as cm_av_arbitrage, so callers can treat both alike.
 import re
 
 from ..models import ZERO, Movement, Position, StatementDocument
-from ..text import DATE, fr_date, fr_decimal
+from ..text import DATE, currency_code, fr_date, fr_decimal
 
 DOC_TYPE = "bourso_vie_arbitrage"
 BROKER = "Bourso Vie"
@@ -19,7 +19,7 @@ BROKER = "Bourso Vie"
 UNITS = r"\d{1,3}(?: \d{3})*,\d+"
 VALUE = r"\d{1,3}(?: \d{3})*,\d{2}"
 CONTRACT_RE = re.compile(r"Contrat n° (\d+)")
-AMOUNT_RE = re.compile(rf"Arbitrage d'un montant de : ({VALUE}) Euros en date du {DATE}")
+AMOUNT_RE = re.compile(rf"Arbitrage d'un montant de : ({VALUE}) (Euros) en date du {DATE}")
 SECTION_RE = re.compile(r"^- (Désinvestissement|Réinvestissement) :$")
 VALEUR_ATTEINTE_RE = re.compile(r"^OBJET : Valeur atteinte")
 CATEGORY_RE = re.compile(r"^- (Fonds en Euros|Unités de Compte)$")
@@ -54,7 +54,8 @@ def parse(doc):
         result.warnings.append("arbitrage amount and date not found")
         return result
     stated = fr_decimal(amount.group(1))
-    when = fr_date(amount.group(2))
+    result.currency = currency_code(amount.group(2))
+    when = fr_date(amount.group(3))
     result.period_start = result.period_end = when
 
     state, category, support = None, None, None
@@ -98,14 +99,14 @@ def parse(doc):
                     Position(
                         as_of=held.get("as_of", when), security_name=support[0], value=value,
                         quantity=held.get("quantity"), price=held.get("price"),
-                        isin=support[1], section=category, snapshot="after",
+                        isin=support[1], currency=result.currency, section=category, snapshot="after",
                     )
                 )
                 support = None
             continue
         if support is None:
             continue
-        movement = _switch(line, state, support, when)
+        movement = _switch(line, state, support, when, result.currency)
         if movement:
             result.movements.append(movement)
             support = None
@@ -114,7 +115,7 @@ def parse(doc):
     return result
 
 
-def _switch(line, state, support, when):
+def _switch(line, state, support, when, currency):
     """The movement for a "Valeur au ..." line under a support, or None
     if the line isn't one."""
     name, isin = support
@@ -122,7 +123,7 @@ def _switch(line, state, support, when):
     units = UNIT_VALUE_RE.match(line)
     if units:
         return Movement(
-            date=when, label=f"Arbitrage {name}", amount=ZERO,
+            date=when, label=f"Arbitrage {name}", amount=ZERO, currency=currency,
             kind="SWITCH_OUT" if state == "out" else "SWITCH_IN",
             value_date=fr_date(units.group(1)), quantity=sign * fr_decimal(units.group(2)),
             isin=isin, security_name=name, price=fr_decimal(units.group(3)),
@@ -132,7 +133,7 @@ def _switch(line, state, support, when):
     if euro:  # the euro fund: a value, no units
         value = fr_decimal(euro.group(2))
         return Movement(
-            date=when, label=f"Arbitrage {name}", amount=ZERO, kind="SWITCH",
+            date=when, label=f"Arbitrage {name}", amount=ZERO, currency=currency, kind="SWITCH",
             value_date=fr_date(euro.group(1)), isin=isin, security_name=name, gross=value,
             extra={"value_delta": sign * value, "unitless": True},
         )

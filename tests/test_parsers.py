@@ -21,6 +21,11 @@ FIXTURES = Path(__file__).parent / "fixtures"
 D = Decimal
 
 
+def currencies(doc):
+    """Every currency a document's records carry."""
+    return {doc.currency, *(r.currency for r in (*doc.movements, *doc.balances, *doc.positions))}
+
+
 # --- Trade Republic CSV ------------------------------------------------------
 
 def test_trade_republic_csv():
@@ -33,9 +38,11 @@ def test_trade_republic_csv():
     assert by_ref["tx-0001"].amount == D("250")
     # fee lives in its own column, amount excludes it: net effect is -5
     assert (by_ref["tx-0002"].amount, by_ref["tx-0002"].fee) == (D("-5.00"), D("5.00"))
-    # a free receipt moves units, not cash
+    # a crypto free receipt has no cash amount: it is counted in coin units
     free = by_ref["tx-0003"]
-    assert (free.amount, free.quantity, free.kind) == (0, D("1.2620300000"), "FREE_RECEIPT")
+    assert (free.amount, free.currency, free.quantity, free.kind) == (
+        D("1.2620300000"), "SOL", D("1.2620300000"), "FREE_RECEIPT")
+    assert free.gross is None
     # interest 0.22 with 0.07 withheld -> 0.15 net
     assert (by_ref["tx-0005"].amount, by_ref["tx-0005"].tax) == (D("0.15"), D("0.07"))
     buy = by_ref["tx-0006"]
@@ -91,7 +98,8 @@ ESPECES_PREAMBLE = """Boursorama S.A.
 RELEVE COMPTE ESPECES : SEPTEMBRE 2025
 Extrait au 30/09/2025
 Références de votre compte espèces
-12345 67890 00099988877 Compte PEA"""
+12345 67890 00099988877 Compte PEA
+Date d'opé. Date compta. Libellé de l'opération Quantité Nom de la valeur Débit EUR Crédit EUR"""
 
 
 def especes(rows):
@@ -114,6 +122,12 @@ def test_boursobank_releve_especes():
     sub, vir, sub2 = doc.movements
     assert (sub.kind, sub.quantity, sub.security_name, sub.amount) == ("SUBSCRIPTION", D("0.776"), "PEA PROF.OFFENS.RE", D("-100.00"))
     assert (vir.kind, vir.amount) == ("VIR", D("250.00"))
+    assert currencies(doc) == {"EUR"} and doc.warnings == []
+
+
+def test_boursobank_releve_especes_without_currency_header_is_a_warning():
+    doc = parse_document(positioned_pdf([[header_line()]], preamble=ESPECES_PREAMBLE.replace(" EUR", "")))
+    assert any("currency" in w for w in doc.warnings)
 
 
 def test_mis_signed_amount_fails_the_balance_check():
@@ -138,7 +152,7 @@ B.I.C. BOUSFRPPXXX I.B.A.N. FR76 1234 5678 9000 1111 1111 155
 MOUVEMENTS EN EUR"""
 
 
-def test_boursobank_releve_compte_multi_page_with_continuations():
+def compte_pages():
     page1 = [
         header_line(),
         line("SOLDE AU : 31/07/2026", credit="6.000,00"),
@@ -155,7 +169,11 @@ def test_boursobank_releve_compte_multi_page_with_continuations():
         line("28/08/2026 VIR Virement depuis LDDS 28/08/2026", debit="1.500,00"),
         line("Nouveau solde en EUR :", credit="4.012,34"),
     ]
-    doc = parse_document(positioned_pdf([page1, page2], preamble=COMPTE_PREAMBLE))
+    return [page1, page2]
+
+
+def test_boursobank_releve_compte_multi_page_with_continuations():
+    doc = parse_document(positioned_pdf(compte_pages(), preamble=COMPTE_PREAMBLE))
 
     assert doc.doc_type == boursobank_releve_compte.DOC_TYPE
     assert doc.account_ref == "FR7612345678900011111111155"
@@ -168,6 +186,17 @@ def test_boursobank_releve_compte_multi_page_with_continuations():
     assert first.reference == "SCT000000000000000001"
     assert (interest.kind, interest.amount) == ("INTERETS", D("12.34"))
     assert last.amount == D("-1500.00")
+    assert currencies(doc) == {"EUR"}
+
+
+def test_boursobank_releve_compte_reads_the_printed_currency():
+    pages = [[ln if "Nouveau solde" not in ln.text else line("Nouveau solde en USD :", credit="4.012,34")
+              for ln in page] for page in compte_pages()]
+    doc = parse_document(positioned_pdf(pages, preamble=COMPTE_PREAMBLE.replace("EUR", "USD")))
+
+    assert doc.doc_type == boursobank_releve_compte.DOC_TYPE
+    assert [b.balance for b in doc.balances] == [D("6000.00"), D("4012.34")]
+    assert currencies(doc) == {"USD"}
 
 
 # --- Crédit Mutuel AV arbitrage ------------------------------------------------------
@@ -221,6 +250,12 @@ def test_cm_av_arbitrage_positions_and_switches():
     assert (switches["FUND GAMMA"].kind, switches["FUND GAMMA"].quantity) == ("SWITCH_IN", D("1.500000"))
     assert switches["ACTIF SECURITE"].extra["value_delta"] == D("-7.83")
     assert all(m.amount == 0 for m in doc.movements)
+    assert currencies(doc) == {"EUR"}
+
+
+def test_cm_av_arbitrage_without_currency_header_is_a_warning():
+    doc = parse_document(text_doc(ARBITRAGE.replace("en euros en euros\n", "")))
+    assert any("currency" in w for w in doc.warnings)
 
 
 def test_cm_av_arbitrage_total_mismatch_is_a_warning():
@@ -289,6 +324,7 @@ def test_bourso_vie_arbitrage_switches_and_positions():
     assert (first.snapshot, first.section, first.isin) == ("after", "Unités de Compte", "LU0000000001")
     assert (first.quantity, first.price, first.value, first.as_of) == (D("4.0000"), D("200.00"), D("799.99"), date(2026, 5, 6))
     assert second.value == D("400.50")
+    assert currencies(doc) == {"EUR"}
 
 
 def test_bourso_vie_arbitrage_unit_fund_sold_and_mismatch_warning():

@@ -75,7 +75,7 @@ a multi-account document.
 | `account_label` | `str \| None` | Account or contract name (`"PEA"`, `"Livret A"`, …) |
 | `period_start` | `date \| None` | First day the document covers |
 | `period_end` | `date \| None` | Last day the document covers |
-| `currency` | `str` | Account currency, `"EUR"` |
+| `currency` | `str` | Account currency as printed on the document (ISO code, e.g. `"EUR"`) |
 | `movements` | `list[Movement]` | Cash / security movements, in document order |
 | `balances` | `list[CashBalance]` | Opening and/or closing balances, when printed |
 | `positions` | `list[Position]` | Holdings snapshots, when printed |
@@ -105,7 +105,7 @@ and `tax` are **positive** magnitudes. A movement with no cash effect
 | `date` | `date` | Operation date |
 | `label` | `str` | Main label, as printed |
 | `amount` | `Decimal` | Signed net cash effect |
-| `currency` | `str` | Defaults to `"EUR"` |
+| `currency` | `str` | As printed on the document; `"EUR"` only when it states none |
 | `kind` | `str \| None` | Movement type assigned by the parser (see per-type table) |
 | `value_date` | `date \| None` | Value date, when printed |
 | `details` | `list[str]` | Continuation lines under the label (counterparty, reference, FX…) |
@@ -128,7 +128,7 @@ and `tax` are **positive** magnitudes. A movement with no cash effect
 | `as_of` | `date` | Balance date |
 | `balance` | `Decimal` | Signed balance |
 | `kind` | `str` | `"opening"` or `"closing"` |
-| `currency` | `str` | Defaults to `"EUR"` |
+| `currency` | `str` | As printed on the document; `"EUR"` only when it states none |
 
 ## `Position`
 
@@ -140,7 +140,7 @@ and `tax` are **positive** magnitudes. A movement with no cash effect
 | `quantity` | `Decimal \| None` | Units; `None` for a unitless euro fund |
 | `price` | `Decimal \| None` | Unit price / NAV |
 | `isin` | `str \| None` | ISIN, when printed |
-| `currency` | `str` | Defaults to `"EUR"` |
+| `currency` | `str` | As printed on the document; `"EUR"` only when it states none |
 | `section` | `str \| None` | Heading the row was listed under |
 | `snapshot` | `str` | `"before"`, `"after"` or `"closing"` |
 
@@ -158,6 +158,9 @@ here keeps its default (`None`, `0`, `[]` or `{}`).
   - `kind`: TR's `type` column (`BUY`, `SELL`, `CARD_TRANSACTION`,
     `CARD_ORDERING_FEE`, `DELIVERY_OUTBOUND`, `TRANSFER_OUT`, …).
   - `amount` = TR amount + fee + tax, i.e. the net cash effect.
+    Exception: a `CRYPTO` row with an empty TR amount (e.g. `FREE_RECEIPT`)
+    gets `amount` = signed shares and `currency` = the coin symbol (`"SOL"`).
+    Filter on `currency` before summing amounts.
   - `gross` = |TR amount|, or `None` when it is 0. `fee`, `tax` are filled.
   - `quantity`, `security_name`, `price`, `currency` come from the
     corresponding columns. `quantity` is negative for `SELL`,
@@ -207,6 +210,8 @@ here keeps its default (`None`, `0`, `[]` or `{}`).
 - **Document:** `account_ref` is the IBAN without spaces. `account_label` is
   the savings account name (`"Livret A"`, `"LDDS"`…), or
   `"Compte courant"`. `period_start`/`period_end` come from "du … au …".
+  `currency` comes from "MOUVEMENTS EN …" (`EUR`, `USD`…) and is carried
+  by every movement and balance.
 - **Balances:** `opening` and `closing` (the closing one is dated
   `period_end`), so the document is reconciled.
 - **Movements:** one per entry.
